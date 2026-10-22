@@ -1,4 +1,5 @@
 name: Build Test (unsigned)
+run-name: Build Test (${{ inputs.source_ref || github.ref_name }})
 
 on:
   # 仅手动触发：用于快速验证「能否在当前平台产物上完成一次完整 tauri build」，
@@ -21,13 +22,27 @@ on:
         required: false
         default: false
         type: boolean
+      source_ref:
+        description: 要构建的分支、标签或提交；留空则构建触发分支
+        required: false
+        default: ''
+        type: string
+      macos_arch:
+        description: macOS 构建的架构（测试只用 Apple Silicon）
+        required: false
+        default: aarch64
+        type: choice
+        options:
+          - aarch64
+          - x86_64
+          - all
 
 permissions:
   contents: read
 
 # 同一分支的手动构建排队执行，避免并发挤占 runner。
 concurrency:
-  group: build-test-${{ github.ref }}
+  group: build-test-${{ github.ref }}-${{ inputs.source_ref }}
   cancel-in-progress: true
 
 jobs:
@@ -39,17 +54,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - id: aarch64
-            target: aarch64-apple-darwin
-          - id: x86_64
-            target: x86_64-apple-darwin
+        include: ${{ fromJSON(inputs.macos_arch == 'all' && '[{"id":"aarch64","target":"aarch64-apple-darwin"},{"id":"x86_64","target":"x86_64-apple-darwin"}]' || format('[{{"id":"{0}","target":"{0}-apple-darwin"}}]', inputs.macos_arch)) }}
     runs-on: macos-latest
     timeout-minutes: 60
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.source_ref }}
           persist-credentials: false
 
       - name: Setup Xcode
@@ -106,6 +118,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.source_ref }}
           persist-credentials: false
 
       - name: Setup Node.js and pnpm
@@ -172,6 +185,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.source_ref }}
           persist-credentials: false
 
       - name: Setup Node.js and pnpm
