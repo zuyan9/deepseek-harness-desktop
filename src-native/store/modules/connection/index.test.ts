@@ -215,6 +215,7 @@ describe('connection hydration', () => {
       pendingFocus: null,
       focusGeneration: 0,
       forgettingOrigin: null,
+      pushOrigins: [],
     })
     connection.setHealth('http://bridge.local:3080', 'unavailable')
     expect(connection.health).toEqual({ 'http://bridge.local:3080': 'unavailable' })
@@ -494,5 +495,40 @@ describe('connection hints, disconnect and serialization', () => {
     serialized.guidedHosts.push('https://mutated.test')
     expect(connection.history[0]?.url).toBe('http://bridge.local:3080/tasks?theme=dark')
     expect(connection.guidedHosts).toEqual(['http://bridge.local:3080'])
+  })
+})
+
+describe('connection push readiness', () => {
+  it('marks only the current origin of the live view as push-ready, once', () => {
+    load(alpha, 10)
+    connection.setPushReady(alpha.id, true, connection.viewGeneration - 1)
+    connection.setPushReady(beta.id, true, connection.viewGeneration)
+    expect(connection.pushOrigins).toEqual([])
+    connection.setPushReady(alpha.id, true, connection.viewGeneration)
+    connection.setPushReady(alpha.id, true, connection.viewGeneration)
+    expect(connection.pushOrigins).toEqual([alpha.id])
+  })
+
+  it('withdraws readiness when the host stops delivering and keeps it across reconnecting other hosts', () => {
+    load(alpha, 10)
+    connection.setPushReady(alpha.id, true, connection.viewGeneration)
+    load(beta, 20)
+    connection.setPushReady(beta.id, true, connection.viewGeneration)
+    expect(connection.pushOrigins).toEqual([alpha.id, beta.id])
+    connection.setPushReady(beta.id, false, connection.viewGeneration)
+    expect(connection.pushOrigins).toEqual([alpha.id])
+  })
+
+  it('forgetting the current host or removing an inactive one drops its readiness', () => {
+    load(alpha, 10)
+    connection.setPushReady(alpha.id, true, connection.viewGeneration)
+    load(beta, 20)
+    connection.setPushReady(beta.id, true, connection.viewGeneration)
+    connection.remove(alpha.id)
+    expect(connection.pushOrigins).toEqual([beta.id])
+    connection.forget(beta.id)
+    expect(connection.pushOrigins).toEqual([])
+    connection.setPushReady(beta.id, true, connection.viewGeneration)
+    expect(connection.pushOrigins).toEqual([])
   })
 })

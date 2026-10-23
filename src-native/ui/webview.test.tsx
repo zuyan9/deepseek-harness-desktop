@@ -20,6 +20,8 @@ const native = vi.hoisted(() => ({
   requestPermissionsAsync: vi.fn<() => Promise<{ granted: boolean }>>(),
   setNotificationChannelAsync: vi.fn<(...args: unknown[]) => Promise<null>>(),
   scheduleNotificationAsync: vi.fn<(...args: unknown[]) => Promise<string>>(),
+  getExpoPushTokenAsync: vi.fn<(options: { projectId: string }) => Promise<{ type: 'expo', data: string }>>(),
+  constants: { easConfig: undefined as { projectId?: string } | undefined, expoConfig: { extra: {} as Record<string, unknown> } },
   cancelAnimation: vi.fn(),
   setTheme: vi.fn<(theme: 'light' | 'dark' | 'system') => void>(),
 }))
@@ -68,12 +70,15 @@ vi.mock('@react-native-async-storage/async-storage', () => ({ default: { getItem
 vi.mock('expo-router', () => ({ useNavigation: () => native.navigation }))
 vi.mock('expo-crypto', () => ({ randomUUID: native.randomUUID }))
 vi.mock('expo-network', () => ({ getIpAddressAsync: vi.fn<() => Promise<string>>() }))
+// expo-constants 同样缺 __DEV__ 无法在 node 里加载；用例按需填入 projectId 与 FCM 配置标记。
+vi.mock('expo-constants', () => ({ default: native.constants }))
 vi.mock('expo-notifications', () => ({
   AndroidImportance: { DEFAULT: 5, HIGH: 6 },
   getPermissionsAsync: native.getPermissionsAsync,
   requestPermissionsAsync: native.requestPermissionsAsync,
   setNotificationChannelAsync: native.setNotificationChannelAsync,
   scheduleNotificationAsync: native.scheduleNotificationAsync,
+  getExpoPushTokenAsync: native.getExpoPushTokenAsync,
 }))
 vi.mock('heroui-native/hooks', () => ({ useThemeColor: (names: string | string[]) => Array.isArray(names) ? names.map(() => '#ffffff') : '#ffffff' }))
 vi.mock('heroui-native/button', async () => {
@@ -312,6 +317,9 @@ beforeEach(async () => {
   native.requestPermissionsAsync.mockResolvedValue({ granted: true })
   native.setNotificationChannelAsync.mockResolvedValue(null)
   native.scheduleNotificationAsync.mockResolvedValue('notification-id')
+  native.getExpoPushTokenAsync.mockResolvedValue({ type: 'expo', data: 'ExponentPushToken[phone]' })
+  native.constants.easConfig = undefined
+  native.constants.expoConfig.extra = {}
   screen = undefined
   store = await import('@/store/modules/connection')
   connection = store.connection
@@ -992,6 +1000,113 @@ describe('rendered Bridge WebView foreground notification authorization', () => 
     expect(native.requestPermissionsAsync).toHaveBeenCalledExactlyOnceWith()
     const calls = [...native.setNotificationChannelAsync.mock.invocationCallOrder, ...native.getPermissionsAsync.mock.invocationCallOrder, ...native.requestPermissionsAsync.mock.invocationCallOrder]
     expect(calls).toEqual([...calls].sort((a, b) => a - b))
+  })
+})
+
+describe('rendered Bridge WebView remote push registration', () => {
+  const notification = { type: 'dsh://native-notification', title: '完成', body: '轮次已完成', sessionId: 'alpha', tag: 'dsh-notification-alpha-1', silent: false }
+  const register = { type: 'dsh://register-push', token: 'ExponentPushToken[phone]', platform: 'android', locale: 'zh', nonce }
+
+  function configurePush(extra: Record<string, unknown> = { eas: { projectId: 'project-id' }, fcmConfigured: true }) {
+    native.constants.expoConfig.extra = extra
+  }
+
+  async function registered(view: NativeViewRef) {
+    await vi.waitFor(() => expect(injectedMessages(view)).toContainEqual(register))
+  }
+
+  it('registers the Expo push token through the verified page once notification access is granted', async () => {
+    configurePush()
+    await mount()
+    await ready()
+    const view = await viewRef()
+    await registered(view)
+    expect(native.getExpoPushTokenAsync).toHaveBeenCalledExactlyOnceWith({ projectId: 'project-id' })
+    expect(injectedMessages(view).filter(message => message.type === 'dsh://register-push')).toHaveLength(1)
+  })
+
+  it('prefers the EAS build project id and registers iOS without FCM configuration', async () => {
+    native.platform.OS = 'ios'
+    native.constants.easConfig = { projectId: 'eas-project' }
+    configurePush({ eas: { projectId: 'project-id' } })
+    await mount()
+    await ready()
+    const view = await viewRef()
+    await vi.waitFor(() => expect(injectedMessages(view)).toContainEqual({ ...register, platform: 'ios' }))
+    expect(native.getExpoPushTokenAsync).toHaveBeenCalledExactlyOnceWith({ projectId: 'eas-project' })
+  })
+
+  it.each([
+    ['without an EAS project id', { fcmConfigured: true }],
+    ['on an Android build without FCM configuration', { eas: { projectId: 'project-id' } }],
+  ])('keeps push unregistered %s', async (_, extra) => {
+    configurePush(extra)
+    await mount()
+    await ready()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0)
+    })
+    const view = await viewRef()
+    expect(native.getPermissionsAsync).toHaveBeenCalled()
+    expect(native.getExpoPushTokenAsync).not.toHaveBeenCalled()
+    expect(injectedMessages(view).some(message => message.type === 'dsh://register-push')).toBe(false)
+  })
+
+  it('does not request a push token when notification access is denied', async () => {
+    configurePush()
+    native.getPermissionsAsync.mockResolvedValue({ granted: false })
+    native.requestPermissionsAsync.mockResolvedValue({ granted: false })
+    await mount()
+    await ready()
+    await vi.waitFor(() => expect(native.requestPermissionsAsync).toHaveBeenCalled())
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0)
+    })
+    expect(native.getExpoPushTokenAsync).not.toHaveBeenCalled()
+  })
+
+  it('stops local notifications for the host once it confirms push delivery', async () => {
+    configurePush()
+    await mount()
+    await ready()
+    await registered(await viewRef())
+    await message({ type: 'dsh://push-registered', token: 'ExponentPushToken[phone]', delivering: true })
+    expect(connection.pushOrigins).toEqual([alpha.id])
+    await changeAppState('background')
+    await message(notification)
+    expect(native.scheduleNotificationAsync).not.toHaveBeenCalled()
+  })
+
+  it('keeps local notifications while the host reports that pushes are not getting through', async () => {
+    configurePush()
+    await mount()
+    await ready()
+    await registered(await viewRef())
+    await message({ type: 'dsh://push-registered', token: 'ExponentPushToken[phone]', delivering: true })
+    await message({ type: 'dsh://push-registered', token: 'ExponentPushToken[phone]', delivering: false })
+    expect(connection.pushOrigins).toEqual([])
+    await changeAppState('background')
+    await message(notification)
+    await vi.waitFor(() => expect(native.scheduleNotificationAsync).toHaveBeenCalledOnce())
+  })
+
+  it('ignores a push confirmation for a token this view never registered', async () => {
+    configurePush()
+    await mount()
+    await ready()
+    await registered(await viewRef())
+    await message({ type: 'dsh://push-registered', token: 'ExponentPushToken[other]', delivering: true })
+    expect(connection.pushOrigins).toEqual([])
+  })
+
+  it('asks the page to drop the push device together with the session when forgetting the host', async () => {
+    configurePush()
+    await mount()
+    await ready()
+    const view = await viewRef()
+    await registered(view)
+    await act(async () => connection.forget(alpha.id))
+    expect(injectedMessages(view)).toContainEqual({ type: 'dsh://forget-session', pushToken: 'ExponentPushToken[phone]', nonce })
   })
 })
 

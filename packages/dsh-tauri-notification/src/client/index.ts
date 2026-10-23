@@ -1,8 +1,9 @@
 import type { ClientContext } from 'dsh-tauri/client'
 import { PLUGIN_ID } from '../shared/constants'
-import { LOCALE_EFFECT, NOTIFY_EFFECT, SETTINGS_EFFECT } from './constants'
+import { LOCALE_EFFECT, NOTIFY_EFFECT, PRESENCE_EFFECT, SETTINGS_EFFECT } from './constants'
 import { locale } from './locales'
 import { notifyFeature } from './register/notify'
+import { presenceFeature } from './register/presence'
 import { settingsFeature } from './register/settings'
 
 export const name = PLUGIN_ID
@@ -17,4 +18,5 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(locale.registerLocale, LOCALE_EFFECT)
   ctx.effect(settingsFeature, SETTINGS_EFFECT)
   ctx.effect(notifyFeature, NOTIFY_EFFECT)
+  ctx.effect(presenceFeature, PRESENCE_EFFECT)
 }

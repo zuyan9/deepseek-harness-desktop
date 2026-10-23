@@ -45,6 +45,7 @@ export interface ConnectionState {
   pendingFocus: NotificationFocus | null
   focusGeneration: number
   forgettingOrigin: string | null
+  pushOrigins: string[]
 }
 
 /** 持久化字段：插件按此顺序把 state 写成 `{version, history, guidedHosts}`。 */
@@ -184,6 +185,7 @@ export function createConnectionState(): ConnectionState {
     pendingFocus: null,
     focusGeneration: 0,
     forgettingOrigin: null,
+    pushOrigins: [],
   }
 }
 
@@ -275,6 +277,12 @@ export const connection = defineStore({
       this.tokens[origin] = token
       this.current.token = token
     },
+    setPushReady(origin: string, ready: boolean, generation: number) {
+      if (generation !== this.viewGeneration || this.current?.id !== origin || this.forgettingOrigin === origin)
+        return
+      const others = this.pushOrigins.filter(entry => entry !== origin)
+      this.pushOrigins = ready ? [...others, origin] : others
+    },
     markLoadFailed(generation: number, message: string) {
       if (!this.current || generation !== this.viewGeneration)
         return
@@ -323,6 +331,7 @@ export const connection = defineStore({
       delete this.tokens[id]
       delete this.health[id]
       delete this.current.token
+      this.pushOrigins = this.pushOrigins.filter(origin => origin !== id)
       if (this.pendingFocus?.origin === id)
         this.queueFocus(null)
       this.forgettingOrigin = id
@@ -334,6 +343,7 @@ export const connection = defineStore({
       this.guidedHosts = this.guidedHosts.filter(origin => origin !== id)
       delete this.tokens[id]
       delete this.health[id]
+      this.pushOrigins = this.pushOrigins.filter(origin => origin !== id)
       if (this.pendingFocus?.origin === id)
         this.queueFocus(null)
     },

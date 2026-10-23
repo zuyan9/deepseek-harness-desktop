@@ -33,7 +33,7 @@ pnpm typecheck:native   # tsc --project tsconfig.native.json --noEmit
 | 文件 | 作用 |
 | --- | --- |
 | `app.json` | Expo 静态配置：应用名 `DSH Mobile`、slug `dsh-bridge`、`expo.version`、Android 包名 `com.dshtauri.dshbridge`、`versionCode`、plugins、权限 |
-| `app.config.js` | Expo 动态配置（ESM）：把 `THIRD_PARTY_NOTICES.md` 全文注入 `extra.thirdPartyNotices`；prebuild 时改写 Android 屏幕方向（见下） |
+| `app.config.js` | Expo 动态配置（ESM）：把 `THIRD_PARTY_NOTICES.md` 全文注入 `extra.thirdPartyNotices`；仓库根存在 `google-services.json` 时接入 `android.googleServicesFile` 并写 `extra.fcmConfigured`（见 §6.1）；prebuild 时改写 Android 屏幕方向（见下） |
 | `metro.config.js` | Metro 配置：`expo/metro-config.js` 全扩展名导入、`withUniwindConfig` 接入 CSS 入口、自定义 `resolver.resolveRequest` 钉住 `@/x`、`blockList` 屏蔽 `src-tauri` / `source` / `dist` 等大目录 |
 | `src-native/entry.ts` | 移动端应用入口（只 `import 'expo-router/entry'`），由 `package.json` 的 `"main"` 指向 |
 | `tsconfig.native.json` | 移动端类型检查工程，`extends: expo/tsconfig.base`，开启 `strict` 与 `noUncheckedIndexedAccess` |
@@ -62,7 +62,7 @@ src-native/
 ├── apis/         # HTTP 访问层：getManifest
 ├── components/   # 品牌与装饰组件（鲸鱼、字标、状态点、脉冲动画等）
 ├── config/       # 常量、React Query client 与 query key
-├── hooks/        # 原生能力封装（通知、应用状态、主机健康轮询）
+├── hooks/        # 原生能力封装（本地通知、远程推送 token、应用状态、主机健康轮询）
 ├── i18n/         # i18next 实例、语言检测与静态语言资源
 ├── services/     # 主机探测（probe-bridge）与候选扫描（scan-candidates）
 ├── store/        # valtio-define 状态模块（modules/connection）
@@ -139,7 +139,21 @@ src-native/
 * 唯一例外是 Cloudflare Access 登录：受信 origin 的文档请求被服务端重定向到 `https://*.cloudflareaccess.com/cdn-cgi/access/login/…` 时，登录留在 WebView 内，流程中的 https 顶层跳转（团队域、IdP）放行，回到受信 origin 即结束，期间隐藏加载遮罩并暂停 20 s 超时，结束后 Android 清空返回历史；已加载文档里点开的同类链接仍走外部浏览器。Google 作为 IdP 会拒绝嵌入式 WebView（`disallowed_useragent`），需改用 One-time PIN 等。
 * 配对登录与会话保留在 WebView 内由 cookie jar 管理，**不**通过 RN `fetch` 登录。远程访问不再生成、保存或接受访问密码；SSH 密码与密钥口令不受影响。
 * 网关仅允许无凭据读取静态 `/manifest.webmanifest`，不为探测铸造上游会话。该例外只接受 `GET` / `HEAD`，拒绝跨源浏览器请求，不放行应用页面、API 或 WebSocket。
-* 上游没有独立的远程推送端点：系统挂起、进程被杀或关闭 App 后**不保证**继续收到新任务通知。
+* 远程推送见 §6.1；未配置或收不到推送时，系统挂起、进程被杀或关闭 App 后**不保证**继续收到新任务通知。
+
+### 6.1 远程推送（Expo → APNs / FCM）
+
+* **发送方是电脑**：`dsh-tauri-notification` 的宿主侧订阅 `session/event`，回合结束（用户中断除外）、`approval/asked`、`ask_user_question` 调用后延迟 10 秒，经 Expo 推送服务（`https://exp.host/--/api/v2/push/send`）发给登记过的手机；延迟期内回合继续、授权已决、提问已答就撤销。桌面端发送不持有任何密钥，APNs / FCM 凭据只存在维护者的 Expo 项目里。
+* **有人在看屏幕就不推**：同一插件的客户端把窗口可见性上报 `PUT /api/tauri/notification/presence`（可见时每 20 秒心跳，宿主按 50 秒宽限期判定）；调度之后任何窗口可见过，这条推送就不发。DSH Mobile 的 WebView 不上报：手机前台由原生 `setNotificationHandler` 不展示，且 iOS 可能在上报「已隐藏」之前就挂起 WebView。
+* **登记**：已认证文档就绪、App 在前台且通知授权通过后，`readPushToken()`（`src-native/hooks/use-push.ts`）换取 Expo push token，WebView 垫片带页面 cookie 调 `PUT /api/tauri/notification/push/devices`（经网关，鉴权与配对一致，不走 RN `fetch`）。宿主按 token 去重、最多保留 20 台、30 天未刷新即清除；Expo 回报 `DeviceNotRegistered`（发送回执或 15 分钟后的收据）时删除。忘记当前主机时垫片先 `DELETE` 推送设备，再清会话 cookie；从历史里删除未连接的主机无法注销，只能等宿主过期清理。
+* **去重**：登记响应带 `delivering`（宿主最近一次推送是否送达 Expo）。只有它为真，App 才停止这台主机 WebView 里的本地通知（`connection.pushOrigins`）；电脑连不上 Expo 时保留本地通知，不会两头都收不到。推送 `data` 与本地通知同形（`origin` / `sessionId` / `title` / `tag`），点击沿用既有的冷启动、切换主机与会话聚焦流程。
+* **维护者一次性配置**（缺任一项 App 都不登记推送，行为与以前一致）：
+```bash
+npx eas-cli@latest init          # 官方 Expo 账号下建项目，把 projectId 写入 app.json 的 expo.extra.eas.projectId
+npx eas-cli@latest credentials   # 上传 APNs .p8（iOS）与 FCM V1 服务账号 JSON（Android）
+```
+  Android 还需把 Firebase 项目的 `google-services.json` 放在仓库根（该文件不含密钥，可以提交）；`app.config.js` 检测到它才置 `extra.fcmConfigured`，否则 Android 不请求 token。iOS 已声明 `aps-environment`（`expo-notifications` 的 `mode: "production"`）。
+* **限制**：没有 GMS 或连不上 Google 的安卓机收不到 FCM，只能继续依赖本地通知或桌面端的 webhook 类插件；只有官方签名（TestFlight / App Store）的 iOS 包能收到，Release 里的未签名 IPA 自签后不行；电脑上的 DSH 必须在运行且能访问 `exp.host`（宿主 `fetch` 不走桌面代理设置）；推送标题是会话标题，正文含授权工具名、原因首句或提问题目，会经过 Expo、Apple、Google 的服务器；Expo 推送目前免费，每个项目限 600 条/秒。
 
 ---
 

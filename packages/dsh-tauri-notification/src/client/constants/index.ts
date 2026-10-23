@@ -24,3 +24,4 @@ export const REPLY_ACTION_ID = 'reply'
 export const LOCALE_EFFECT = `${PLUGIN_ID}: locale`
 export const SETTINGS_EFFECT = `${PLUGIN_ID}: settings group`
 export const NOTIFY_EFFECT = `${PLUGIN_ID}: notify`
+export const PRESENCE_EFFECT = `${PLUGIN_ID}: presence`

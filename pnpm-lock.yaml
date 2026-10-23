@@ -1178,6 +1178,9 @@ importers:
       h3:
         specifier: 'catalog:'
         version: 2.0.1
+      unstorage:
+        specifier: catalog:utils
+        version: 1.17.5(idb-keyval@6.3.0)
     devDependencies:
       dsh-tauri-tsdown:
         specifier: workspace:*

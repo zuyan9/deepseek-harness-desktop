@@ -21,6 +21,7 @@ import { Logo, Wordmark } from '@/components/icons'
 import { ACCESS_LOGIN_PATH, ACCESS_TEAM_DOMAIN_SUFFIX, SESSION_FORGET_TIMEOUT_MS, WEBVIEW_LOAD_TIMEOUT_MS } from '@/config/constants'
 import { useAppState } from '@/hooks/use-app-state'
 import { requestNotificationAccess, sendNativeNotification } from '@/hooks/use-notifications'
+import { readPushToken } from '@/hooks/use-push'
 import { connection } from '@/store/modules/connection'
 import { connectAddress, refreshHealth } from '@/store/modules/connection/runtime'
 import { buildConnectUrl, isTrustedOrigin } from '@/utils/bridge-protocol'
@@ -28,7 +29,7 @@ import { createNotificationShim, keyboardHeightScript, nativeMessageScript, pars
 
 export function BridgeWebView({ address, generation }: { address: BridgeAddress, generation: number }) {
   const ref = useRef<WebView>(null)
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const [nonce] = useState(randomUUID)
   const [source] = useState(() => ({
     uri: !address.token && !connection.tokens[address.id] && !connection.history.some(entry => entry.id === address.id)
@@ -38,6 +39,7 @@ export function BridgeWebView({ address, generation }: { address: BridgeAddress,
   const mainUrlRef = useRef(source.uri)
   const canGoBackRef = useRef(false)
   const focusRequestRef = useRef<{ requestId: string, focus: NotificationFocus } | null>(null)
+  const pushTokenRef = useRef<string | null>(null)
   const documentReadyRef = useRef(false)
   const redirectableRef = useRef(true)
   const authenticatingRef = useRef(false)
@@ -74,8 +76,8 @@ export function BridgeWebView({ address, generation }: { address: BridgeAddress,
       hidden: appState !== 'active',
     }))
   }, [address.id, appState, documentReady, nonce, state.loadError])
-  // keep:whenever Request native notification access as soon as a verified document reaches the foreground.
-  useWhenever(documentReady && !state.loadError && appState === 'active', () => void requestNotificationAccess())
+  // keep:whenever Request native notification access and register remote push as soon as a verified document reaches the foreground.
+  useWhenever(documentReady && !state.loadError && appState === 'active', () => void enableNotifications())
   // keep:effect Keep notification focus pending until the loaded page acknowledges selection.
   useEffect(() => {
     const focus = state.pendingFocus
@@ -109,7 +111,7 @@ export function BridgeWebView({ address, generation }: { address: BridgeAddress,
   useEffect(() => {
     if (state.forgettingOrigin !== address.id)
       return
-    ref.current?.injectJavaScript(nativeMessageScript(address.id, nonce, { type: 'dsh://forget-session' }))
+    ref.current?.injectJavaScript(nativeMessageScript(address.id, nonce, { type: 'dsh://forget-session', pushToken: pushTokenRef.current ?? undefined }))
     const timeout = setTimeout(() => {
       if (generation === connection.viewGeneration && connection.forgettingOrigin === address.id)
         connection.remove(address.id)
@@ -126,6 +128,20 @@ export function BridgeWebView({ address, generation }: { address: BridgeAddress,
     })
     return () => subscription.remove()
   }, [navigation])
+  async function enableNotifications() {
+    if (!await requestNotificationAccess())
+      return
+    const token = await readPushToken()
+    if (!token || generation !== connection.viewGeneration || connection.forgettingOrigin === address.id)
+      return
+    pushTokenRef.current = token
+    ref.current?.injectJavaScript(nativeMessageScript(address.id, nonce, {
+      type: 'dsh://register-push',
+      token,
+      platform: Platform.OS === 'ios' ? 'ios' : 'android',
+      locale: i18n.language.startsWith('zh') ? 'zh' : 'en',
+    }))
+  }
   async function openExternal(raw: string) {
     try {
       const url = new URL(raw)
@@ -197,6 +213,11 @@ export function BridgeWebView({ address, generation }: { address: BridgeAddress,
       Uniwind.setTheme(message.theme)
       return
     }
+    if (message.type === 'dsh://push-registered') {
+      if (message.token === pushTokenRef.current)
+        connection.setPushReady(address.id, message.delivering, generation)
+      return
+    }
     if (message.type === 'dsh://focus-result') {
       const request = focusRequestRef.current
       const pending = connection.pendingFocus
@@ -210,7 +231,8 @@ export function BridgeWebView({ address, generation }: { address: BridgeAddress,
         connection.setNotice(t('connection.focusFailed'))
       return
     }
-    void sendNativeNotification(message, address.id)
+    if (!connection.pushOrigins.includes(address.id))
+      void sendNativeNotification(message, address.id)
   }
   function loadingStarted(url: string, loading: boolean) {
     if (generation !== connection.viewGeneration || !isTrustedOrigin(url, address.id))

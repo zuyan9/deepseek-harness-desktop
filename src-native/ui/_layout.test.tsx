@@ -46,6 +46,8 @@ vi.mock('@react-native-async-storage/async-storage', () => ({ default: { getItem
 vi.mock('expo-secure-store', () => ({ getItemAsync: native.readToken, setItemAsync: native.writeToken, deleteItemAsync: native.deleteToken }))
 vi.mock('expo-network', () => ({ getIpAddressAsync: native.getIpAddressAsync }))
 vi.mock('expo-crypto', () => ({ randomUUID: () => 'root-test-nonce' }))
+// expo-constants 同样缺 __DEV__ 无法在 node 里加载；没有 projectId 即视为未配置远程推送。
+vi.mock('expo-constants', () => ({ default: { expoConfig: { extra: {} } } }))
 vi.mock('expo-notifications', () => ({
   AndroidImportance: { DEFAULT: 5, HIGH: 6 },
   DEFAULT_ACTION_IDENTIFIER: 'expo.modules.notifications.actions.DEFAULT',

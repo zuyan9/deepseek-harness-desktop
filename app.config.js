@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import configPlugins from 'expo/config-plugins.js'
 
@@ -25,11 +25,14 @@ const orientationMembers = `
 `
 
 export default function appConfig({ config }) {
+  const fcmConfigured = existsSync(`${rootDir}google-services.json`)
   const withNotices = {
     ...config,
+    android: fcmConfigured ? { ...config.android, googleServicesFile: './google-services.json' } : config.android,
     extra: {
       ...config.extra,
       thirdPartyNotices: readFileSync(`${rootDir}THIRD_PARTY_NOTICES.md`, 'utf8'),
+      fcmConfigured,
     },
   }
   // Expo 的 `orientation` 由 iOS / Android 共用，Android 也没有 iPad 那样的平板专用键：

@@ -10,6 +10,7 @@ export type NativeWebViewMessage
     | { type: 'dsh://session-forgotten' }
     | { type: 'dsh://theme-state', theme: 'light' | 'dark' | 'system' }
     | { type: 'dsh://focus-result', requestId: string, handled: boolean }
+    | { type: 'dsh://push-registered', token: string, delivering: boolean }
 
 export function parseNativeMessage(raw: string, nativeUrl: string, expectedOrigin: string, nonce: string): NativeWebViewMessage | null {
   if (raw.length > 16384 || !isTrustedOrigin(nativeUrl, expectedOrigin))
@@ -34,6 +35,11 @@ export function parseNativeMessage(raw: string, nativeUrl: string, expectedOrigi
       if (typeof payload.requestId !== 'string' || !payload.requestId || payload.requestId.length > 128 || typeof payload.handled !== 'boolean')
         return null
       return { type: 'dsh://focus-result', requestId: payload.requestId, handled: payload.handled }
+    }
+    if (payload.type === 'dsh://push-registered') {
+      if (typeof payload.token !== 'string' || !payload.token || payload.token.length > 256 || typeof payload.delivering !== 'boolean')
+        return null
+      return { type: 'dsh://push-registered', token: payload.token, delivering: payload.delivering }
     }
     if (payload.type !== 'dsh://native-notification')
       return null
@@ -107,6 +113,7 @@ export function createNotificationShim(origin: string, nonce: string, nativeSafe
   var sessionRequested = false;
   var sessionForgotten = false;
   var sessionUrl = expectedOrigin + '/api/tauri/remote/access/session';
+  var pushUrl = expectedOrigin + '/api/tauri/notification/push/devices';
   function send(payload) {
     if (!active || window.__dshBridgeNonce !== nonce || !window.ReactNativeWebView) return false;
     var raw = JSON.stringify({ channel: 'dsh-bridge', origin: expectedOrigin, nonce: nonce, payload: payload });
@@ -222,13 +229,36 @@ export function createNotificationShim(origin: string, nonce: string, nativeSafe
     }
     focusTimer = setTimeout(tryFocus, ${FOCUS_RETRY_INTERVAL_MS});
   }
+  function pushRequest(method, body) {
+    return fetch(pushUrl, { method: method, credentials: 'same-origin', cache: 'no-store', redirect: 'error', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  }
+  function forgetSession() {
+    return fetch(sessionUrl, { method: 'DELETE', credentials: 'same-origin', cache: 'no-store', redirect: 'error' })
+      .then(function (response) { if (response.ok) send({ type: 'dsh://session-forgotten' }); }).catch(function () {});
+  }
+  function registerPush(data) {
+    if (sessionForgotten || typeof fetch !== 'function') return;
+    pushRequest('PUT', { token: data.token, platform: data.platform, locale: data.locale, origin: expectedOrigin })
+      .then(function (response) { return response.ok ? response.json() : null; })
+      .then(function (result) {
+        if (!sessionForgotten && result && result.ok === true) send({ type: 'dsh://push-registered', token: data.token, delivering: result.delivering === true });
+      }).catch(function () {});
+  }
   window.__dshBridgeReceive = function (data) {
     if (!active || window.__dshBridgeNonce !== nonce || !data || data.nonce !== nonce) return;
     if (data.type === 'dsh://forget-session') {
       if (sessionForgotten) return;
       sessionForgotten = true;
-      if (typeof fetch === 'function') fetch(sessionUrl, { method: 'DELETE', credentials: 'same-origin', cache: 'no-store', redirect: 'error' })
-        .then(function (response) { if (response.ok) send({ type: 'dsh://session-forgotten' }); }).catch(function () {});
+      if (typeof fetch !== 'function') return;
+      // Why: the push device has to be dropped while the session cookie can still authenticate the request.
+      if (typeof data.pushToken === 'string' && data.pushToken && data.pushToken.length <= 256)
+        pushRequest('DELETE', { token: data.pushToken }).catch(function () {}).then(forgetSession);
+      else forgetSession();
+      return;
+    }
+    if (data.type === 'dsh://register-push' && typeof data.token === 'string' && data.token && data.token.length <= 256
+      && (data.platform === 'ios' || data.platform === 'android') && (data.locale === 'zh' || data.locale === 'en')) {
+      registerPush(data);
       return;
     }
     if (data.type === 'dsh://visibility-state') {

@@ -332,6 +332,96 @@ describe('paired device authorization bridge', () => {
   })
 })
 
+describe('remote push registration through the authenticated page', () => {
+  const pushUrl = `${origin}/api/tauri/notification/push/devices`
+  const sessionUrl = `${origin}/api/tauri/remote/access/session`
+  const pushToken = 'ExponentPushToken[phone]'
+
+  function registered(browser: ReturnType<typeof createBrowser>) {
+    return browser.posts.mock.calls.map(([raw]) => parseNativeMessage(raw, nativeUrl, origin, nonce)).filter(message => message?.type === 'dsh://push-registered')
+  }
+
+  it('accepts only a well-formed push confirmation envelope', () => {
+    expect(parseNativeMessage(envelope({ type: 'dsh://push-registered', token: pushToken, delivering: true }), nativeUrl, origin, nonce))
+      .toEqual({ type: 'dsh://push-registered', token: pushToken, delivering: true })
+    for (const invalid of [{ token: pushToken }, { token: '', delivering: true }, { token: 'x'.repeat(257), delivering: true }, { token: 1, delivering: false }, { token: pushToken, delivering: 'yes' }])
+      expect(parseNativeMessage(envelope({ type: 'dsh://push-registered', ...invalid }), nativeUrl, origin, nonce)).toBeNull()
+    expect(parseNativeMessage(envelope({ type: 'dsh://push-registered', token: pushToken, delivering: true }), nativeUrl, origin, 'stale')).toBeNull()
+  })
+
+  it('registers the token with a cookie-authenticated PUT and reports whether the host can deliver pushes', async () => {
+    const browser = createBrowser()
+    browser.fetch.mockResolvedValue(Response.json({ ok: true, delivering: false }))
+    browser.inject()
+    browser.run(nativeMessageScript(origin, nonce, { type: 'dsh://register-push', token: pushToken, platform: 'ios', locale: 'en' }))
+    await vi.waitFor(() => expect(registered(browser)).toEqual([{ type: 'dsh://push-registered', token: pushToken, delivering: false }]))
+    expect(browser.fetch).toHaveBeenCalledExactlyOnceWith(pushUrl, {
+      method: 'PUT',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      redirect: 'error',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: pushToken, platform: 'ios', locale: 'en', origin }),
+    })
+    browser.window.dispatchEvent(new Event('pagehide'))
+  })
+
+  it.each([404, 401])('stays silent when the host answers %s to the registration', async (status) => {
+    const browser = createBrowser()
+    browser.fetch.mockResolvedValue(new Response(null, { status }))
+    browser.inject()
+    browser.run(nativeMessageScript(origin, nonce, { type: 'dsh://register-push', token: pushToken, platform: 'android', locale: 'zh' }))
+    await vi.waitFor(() => expect(browser.fetch).toHaveBeenCalledOnce())
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(registered(browser)).toEqual([])
+    browser.window.dispatchEvent(new Event('pagehide'))
+  })
+
+  it.each([
+    { token: '', platform: 'ios', locale: 'zh' },
+    { token: 'x'.repeat(257), platform: 'ios', locale: 'zh' },
+    { token: pushToken, platform: 'web', locale: 'zh' },
+    { token: pushToken, platform: 'ios', locale: 'ko' },
+  ])('refuses a malformed registration request %j', (data) => {
+    const browser = createBrowser()
+    browser.inject()
+    browser.run(nativeMessageScript(origin, nonce, { type: 'dsh://register-push', ...data }))
+    browser.run(nativeMessageScript(origin, 'stale', { type: 'dsh://register-push', token: pushToken, platform: 'ios', locale: 'zh' }))
+    expect(browser.fetch).not.toHaveBeenCalled()
+    browser.window.dispatchEvent(new Event('pagehide'))
+  })
+
+  it('drops the push device before clearing the session cookie, and still forgets when that fails', async () => {
+    for (const outcome of ['ok', 'fail'] as const) {
+      const browser = createBrowser()
+      const pushDelete = Promise.withResolvers<Response>()
+      browser.fetch.mockReturnValueOnce(pushDelete.promise).mockResolvedValue(new Response(null, { status: 204 }))
+      browser.inject()
+      browser.run(nativeMessageScript(origin, nonce, { type: 'dsh://forget-session', pushToken }))
+      expect(browser.fetch).toHaveBeenCalledExactlyOnceWith(pushUrl, expect.objectContaining({ method: 'DELETE', credentials: 'same-origin', body: JSON.stringify({ token: pushToken }) }))
+      if (outcome === 'ok')
+        pushDelete.resolve(new Response(null, { status: 200 }))
+      else
+        pushDelete.reject(new TypeError('Failed to fetch'))
+      await vi.waitFor(() => expect(browser.fetch).toHaveBeenCalledTimes(2))
+      expect(browser.fetch.mock.calls[1]).toEqual([sessionUrl, { method: 'DELETE', credentials: 'same-origin', cache: 'no-store', redirect: 'error' }])
+      await vi.waitFor(() => expect(browser.posts.mock.calls.some(([raw]) => parseNativeMessage(raw, nativeUrl, origin, nonce)?.type === 'dsh://session-forgotten')).toBe(true))
+      browser.window.dispatchEvent(new Event('pagehide'))
+    }
+  })
+
+  it('ignores registration requests once the session is being forgotten', async () => {
+    const browser = createBrowser()
+    browser.fetch.mockResolvedValue(new Response(null, { status: 204 }))
+    browser.inject()
+    browser.run(nativeMessageScript(origin, nonce, { type: 'dsh://forget-session' }))
+    browser.run(nativeMessageScript(origin, nonce, { type: 'dsh://register-push', token: pushToken, platform: 'ios', locale: 'zh' }))
+    expect(browser.fetch).toHaveBeenCalledExactlyOnceWith(sessionUrl, { method: 'DELETE', credentials: 'same-origin', cache: 'no-store', redirect: 'error' })
+    browser.window.dispatchEvent(new Event('pagehide'))
+  })
+})
+
 describe('trusted WebView theme and touch styling', () => {
   it.each(['light', 'dark', 'system'] as const)('accepts only the canonical theme source %s through authenticated IPC', (theme) => {
     expect(parseNativeMessage(envelope({ type: 'dsh://theme-state', theme }), nativeUrl, origin, nonce)).toEqual({ type: 'dsh://theme-state', theme })

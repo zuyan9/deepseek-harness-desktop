@@ -9,3 +9,28 @@ export interface TurnEndResult {
   reason?: string
   turn?: number
 }
+
+export interface PutPushDeviceBody {
+  token?: string
+  platform?: string
+  locale?: string
+  origin?: string
+}
+
+export interface DeletePushDeviceBody {
+  token?: string
+}
+
+export interface PutPresenceBody {
+  clientId?: string
+  visible?: boolean
+}
+
+export interface ActionResult {
+  ok: boolean
+  error?: string
+}
+
+export interface PushDeviceResult extends ActionResult {
+  delivering?: boolean
+}

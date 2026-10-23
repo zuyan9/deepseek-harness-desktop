@@ -1,9 +1,20 @@
 import type { AndroidConfig, ExportedConfig } from 'expo/config-plugins'
-import { readFileSync } from 'node:fs'
+import type { PathLike } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { getConfig } from 'expo/config'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+
+const googleServices = vi.hoisted(() => ({ present: undefined as boolean | undefined }))
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>()
+  return {
+    ...actual,
+    existsSync: (path: PathLike) => googleServices.present !== undefined && String(path).endsWith('google-services.json') ? googleServices.present : actual.existsSync(path),
+  }
+})
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const packageVersion = (JSON.parse(readFileSync(resolve(projectRoot, 'package.json'), 'utf8')) as { version: string }).version
@@ -175,5 +186,35 @@ describe('android orientation generated at prebuild', () => {
     const changed = mainActivityTemplate.replace('class MainActivity : ReactActivity() {', 'class MainActivity : ReactActivity(), Runnable {')
 
     await expect(patchMainActivity(changed)).rejects.toThrow('MainActivity.kt no longer matches the Expo template')
+  })
+})
+
+describe('android FCM configuration generated from google-services.json', () => {
+  afterEach(() => {
+    googleServices.present = undefined
+  })
+
+  async function appConfigWith(present: boolean) {
+    googleServices.present = present
+    vi.resetModules()
+    const { default: appConfig } = await import(/* @vite-ignore */ pathToFileURL(resolve(projectRoot, 'app.config.js')).href)
+    return appConfig({ config: { name: 'DSH Mobile', slug: 'dsh-bridge', android: { package: 'com.dshtauri.dshbridge' }, extra: { eas: { projectId: 'project-id' } } } })
+  }
+
+  it('wires google-services.json into the Android build and marks FCM as configured', async () => {
+    const config = await appConfigWith(true)
+    expect(config.android).toEqual({ package: 'com.dshtauri.dshbridge', googleServicesFile: './google-services.json' })
+    expect(config.extra).toMatchObject({ eas: { projectId: 'project-id' }, fcmConfigured: true })
+  })
+
+  it('leaves Android FCM off when the checkout has no google-services.json', async () => {
+    const config = await appConfigWith(false)
+    expect(config.android).toEqual({ package: 'com.dshtauri.dshbridge' })
+    expect(config.extra).toMatchObject({ eas: { projectId: 'project-id' }, fcmConfigured: false })
+  })
+
+  it('embeds the FCM flag matching this checkout in the public config read by expo-constants', () => {
+    const { exp } = getConfig(projectRoot, { isPublicConfig: true, skipSDKVersionRequirement: true })
+    expect(exp.extra?.fcmConfigured).toBe(existsSync(resolve(projectRoot, 'google-services.json')))
   })
 })
